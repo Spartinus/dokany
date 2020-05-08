@@ -21,6 +21,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+#include "irp_buffer_helper.h"
 
 NTSTATUS
 DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
@@ -38,6 +39,8 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   // PAGED_CODE();
 
   __try {
+    Irp->IoStatus.Information = 0;
+
     DDbgPrint("==> DokanQueryInformation\n");
 
     irpSp = IoGetCurrentIrpStackLocation(Irp);
@@ -55,13 +58,6 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
     DokanPrintFileName(fileObject);
 
-    /*
-    if (fileObject->FsContext2 == NULL &&
-            fileObject->FileName.Length == 0) {
-            // volume open?
-            status = STATUS_SUCCESS;
-            __leave;
-    }*/
     vcb = DeviceObject->DeviceExtension;
     if (GetIdentifierType(vcb) != VCB ||
         !DokanCheckCCB(vcb->Dcb, fileObject->FsContext2)) {
@@ -161,30 +157,25 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       DDbgPrint("  FileNetworkOpenInformation\n");
       break;
     case FilePositionInformation: {
-      PFILE_POSITION_INFORMATION posInfo;
-
       DDbgPrint("  FilePositionInformation\n");
 
-      if (irpSp->Parameters.QueryFile.Length <
-          sizeof(FILE_POSITION_INFORMATION)) {
+      PFILE_POSITION_INFORMATION posInfo;
+      if (!PREPARE_OUTPUT(Irp, posInfo, /*SetInformationOnFailure=*/FALSE)) {
+        info = Irp->IoStatus.Information;
         status = STATUS_INFO_LENGTH_MISMATCH;
-
-      } else {
-        posInfo = (PFILE_POSITION_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
-        ASSERT(posInfo != NULL);
-
-        RtlZeroMemory(posInfo, sizeof(FILE_POSITION_INFORMATION));
-
-        if (fileObject->CurrentByteOffset.QuadPart < 0) {
-          status = STATUS_INVALID_PARAMETER;
-        } else {
-          // set the current file offset
-          posInfo->CurrentByteOffset = fileObject->CurrentByteOffset;
-
-          info = sizeof(FILE_POSITION_INFORMATION);
-          status = STATUS_SUCCESS;
-        }
+        __leave;
       }
+
+      if (fileObject->CurrentByteOffset.QuadPart < 0) {
+        status = STATUS_INVALID_PARAMETER;
+        info = Irp->IoStatus.Information;
+        __leave;
+      }
+
+      // set the current file offset
+      posInfo->CurrentByteOffset = fileObject->CurrentByteOffset;
+      status = STATUS_SUCCESS;
+      info = Irp->IoStatus.Information;
       __leave;
     } break;
     case FileStreamInformation:
@@ -619,7 +610,7 @@ DokanDispatchSetInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     eventContext->Operation.SetFile.BufferLength =
         irpSp->Parameters.SetFile.Length;
 
-    // the offset from beginning of structure to fill FileInfo
+    // the offset from begining of structure to fill FileInfo
     eventContext->Operation.SetFile.BufferOffset =
         FIELD_OFFSET(EVENT_CONTEXT, Operation.SetFile.FileName[0]) +
         fcb->FileName.Length + sizeof(WCHAR); // the last null char
