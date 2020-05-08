@@ -179,6 +179,7 @@ BOOLEAN AppendVarSizeOutputString(_Inout_ PIRP Irp, _Inout_ PVOID Dest,
                                   UpdateInformationOnFailure)) {
       if (FillSpaceWithPartialString) {
         copySize = GetProvidedOutputSize(Irp) - destOffset;
+        Irp->IoStatus.Information += copySize;
       } else {
         return FALSE;
       }

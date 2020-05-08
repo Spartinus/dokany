@@ -32,7 +32,6 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   PDokanCCB ccb;
   PDokanFCB fcb = NULL;
   PDokanVCB vcb;
-  ULONG info = 0;
   ULONG eventLength;
   PEVENT_CONTEXT eventContext;
 
@@ -102,55 +101,41 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       DDbgPrint("  FileNormalizedNameInformation\n");
     case FileNameInformation: {
       DDbgPrint("  FileNameInformation\n");
-      PFILE_NAME_INFORMATION nameInfo
-        = (PFILE_NAME_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
-      ASSERT(nameInfo != NULL);
 
-      PUINT8 nameInfoFileName = (PUINT8)nameInfo->FileName;
-      PUINT8 allocatedBufferEnd = irpSp->Parameters.QueryFile.Length +
-                                  (PUINT8)Irp->AssociatedIrp.SystemBuffer;
-      PUNICODE_STRING fileName = &fcb->FileName;
-      status = STATUS_SUCCESS;
-
-      if (irpSp->Parameters.QueryFile.Length <
-          UFIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0])) {
-        info = 0;
+      PFILE_NAME_INFORMATION nameInfo;
+      if (!PREPARE_OUTPUT(Irp, nameInfo, /*SetInformationOnFailure=*/FALSE)) {
         status = STATUS_BUFFER_TOO_SMALL;
         __leave;
       }
 
+      PUNICODE_STRING fileName = &fcb->FileName;
+      PCHAR dest = (PCHAR)&nameInfo->FileName;
+      nameInfo->FileNameLength = fileName->Length;
+
       BOOL isNetworkDevice =
           (vcb->Dcb->VolumeDeviceType == FILE_DEVICE_NETWORK_FILE_SYSTEM);
-      ULONG copyLength = 0; 
       if (isNetworkDevice) {
         PUNICODE_STRING devicePath = vcb->Dcb->UNCName->Length
                                          ? vcb->Dcb->UNCName
                                          : vcb->Dcb->DiskDeviceName;
-        nameInfo->FileNameLength = devicePath->Length + fileName->Length;
+        nameInfo->FileNameLength += devicePath->Length;
 
-        copyLength = devicePath->Length;
-        if (copyLength > (ULONG)(allocatedBufferEnd - nameInfoFileName)) {
-            copyLength = (ULONG)(allocatedBufferEnd - nameInfoFileName);
-            status = STATUS_BUFFER_OVERFLOW;
+        if (!AppendVarSizeOutputString(Irp, dest, devicePath,
+                                       /*UpdateInformationOnFailure=*/FALSE,
+                                       /*FillSpaceWithPartialString=*/TRUE)) {
+          status = STATUS_BUFFER_OVERFLOW;
+          __leave;
         }
-
-        RtlCopyMemory(nameInfoFileName, devicePath->Buffer,
-                        copyLength);
-        nameInfoFileName += copyLength;
-        } else {
-        nameInfo->FileNameLength = fileName->Length;
+        dest += devicePath->Length;
       }
 
-      copyLength = fileName->Length;
-      if (copyLength > (ULONG)(allocatedBufferEnd - nameInfoFileName)) {
-        copyLength = (ULONG)(allocatedBufferEnd - nameInfoFileName);
+      if (!AppendVarSizeOutputString(Irp, dest, fileName,
+                                     /*UpdateInformationOnFailure=*/FALSE,
+                                     /*FillSpaceWithPartialString=*/TRUE)) {
         status = STATUS_BUFFER_OVERFLOW;
+        __leave;
       }
-
-      RtlCopyMemory(nameInfoFileName, fileName->Buffer, copyLength);
-      nameInfoFileName += copyLength;
-
-      info = (ULONG)(nameInfoFileName - (PUINT8)Irp->AssociatedIrp.SystemBuffer);
+      status = STATUS_SUCCESS;
       __leave;
     } break;
     case FileNetworkOpenInformation:
@@ -161,21 +146,18 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
       PFILE_POSITION_INFORMATION posInfo;
       if (!PREPARE_OUTPUT(Irp, posInfo, /*SetInformationOnFailure=*/FALSE)) {
-        info = Irp->IoStatus.Information;
         status = STATUS_INFO_LENGTH_MISMATCH;
         __leave;
       }
 
       if (fileObject->CurrentByteOffset.QuadPart < 0) {
         status = STATUS_INVALID_PARAMETER;
-        info = Irp->IoStatus.Information;
         __leave;
       }
 
       // set the current file offset
       posInfo->CurrentByteOffset = fileObject->CurrentByteOffset;
       status = STATUS_SUCCESS;
-      info = Irp->IoStatus.Information;
       __leave;
     } break;
     case FileStreamInformation:
@@ -239,7 +221,7 @@ DokanDispatchQueryInformation(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
     if (fcb)
       DokanFCBUnlock(fcb);
 
-    DokanCompleteIrpRequest(Irp, status, info);
+    DokanCompleteIrpRequest(Irp, status, Irp->IoStatus.Information);
 
     DDbgPrint("<== DokanQueryInformation\n");
   }
